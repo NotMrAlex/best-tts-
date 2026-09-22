@@ -16,8 +16,8 @@
       "command": "python3 -m pip install --break-system-packages edge-tts pydub"
     },
     {
-      "name": "Install ffmpeg Binary",
-      "command": "python3 -m pip install --break-system-packages imageio-ffmpeg && ln -sf $(python3 -c \"import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())\") /usr/local/bin/ffmpeg"
+      "name": "Install ffmpeg + ffprobe",
+      "command": "curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJf - -C /tmp && ln -sf $(ls -d /tmp/ffmpeg-*-amd64-static | head -1)/ffmpeg /usr/local/bin/ffmpeg && ln -sf $(ls -d /tmp/ffmpeg-*-amd64-static | head -1)/ffprobe /usr/local/bin/ffprobe"
     },
     {
       "name": "Install RVC Library",

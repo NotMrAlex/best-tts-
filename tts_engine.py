@@ -170,30 +170,52 @@ def normalize_story(story_data):
         if item.get("render") is False:
             continue
             
-        scene = {"page": item.get("page", 1), "panel": item.get("panel", 1), "text": {}}
+        scene = {"page": item.get("page", 1), "panel": item.get("panel", 1), "text": {}, "intro": {}}
         
         for key in item:
             if key.startswith("narration_"):
                 lang_name = key.replace("narration_", "")
                 scene["text"][lang_name] = item[key]
+            elif key.startswith("intro_"):
+                lang_name = key.replace("intro_", "")
+                if item[key] and str(item[key]).strip():
+                    scene["intro"][lang_name] = item[key]
         
         normalized["story"].append(scene)
     return normalized
 
 # ================= 4. TTS + RVC GENERATION =================
-async def generate_audio(rvc, text, lang, voice, panel_id, cfg, index_path):
-    temp_dir = os.path.join(DIRS["cache_audio"], lang)
-    final_dir = os.path.join(DIRS["final_audio"], lang)
+def finalize_audio(tmp_path, final_path, label):
+    try:
+        audio = AudioSegment.from_file(tmp_path)
+        if os.path.getsize(tmp_path) == 0 or len(audio) < 100:
+            raise ValueError("audio empty or too short")
+        os.replace(tmp_path, final_path)
+        return True
+    except Exception as e:
+        print(f"    [{label}] ✗ Validation failed: {e}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return False
+
+async def generate_audio(rvc, text, lang, voice, panel_id, cfg, index_path, subdir=""):
+    temp_dir = os.path.join(DIRS["cache_audio"], lang, subdir) if subdir else os.path.join(DIRS["cache_audio"], lang)
+    final_dir = os.path.join(DIRS["final_audio"], lang, subdir) if subdir else os.path.join(DIRS["final_audio"], lang)
     
     os.makedirs(temp_dir, exist_ok=True)
     os.makedirs(final_dir, exist_ok=True)
     
     tts_path = os.path.join(temp_dir, f"{panel_id}.mp3")
     rvc_path = os.path.join(final_dir, f"{panel_id}.wav")
+    tmp_rvc_path = os.path.join(final_dir, f"{panel_id}.tmp.wav")
+
+    label = f"{lang}/{subdir}" if subdir else lang
 
     if os.path.exists(rvc_path):
-        print(f"    [{lang}] ✓ {panel_id} (cached)")
-        return
+        if os.path.getsize(rvc_path) > 0:
+            print(f"    [{label}] ✓ {panel_id} (cached)")
+            return
+        os.remove(rvc_path)
 
     try:
         # Generate base TTS
@@ -215,9 +237,9 @@ async def generate_audio(rvc, text, lang, voice, panel_id, cfg, index_path):
         
         # Save smoothed audio
         audio.export(tts_path, format="mp3")
-        print(f"    [{lang}] TTS Generated & Smoothed: {panel_id}")
+        print(f"    [{label}] TTS Generated & Smoothed: {panel_id}")
     except Exception as e:
-        print(f"    [{lang}] ✗ TTS Error: {e}")
+        print(f"    [{label}] ✗ TTS Error: {e}")
         return
 
     try:
@@ -229,11 +251,18 @@ async def generate_audio(rvc, text, lang, voice, panel_id, cfg, index_path):
         index_rate = cfg.get("RVC_SETTINGS", {}).get("index_rate", 0.75)
         
         rvc.set_params(f0method=method, pitch=pitch, index_rate=index_rate)
-        rvc.infer_file(tts_path, rvc_path)
-        print(f"    [{lang}] ✓ RVC Complete: {panel_id}")
+        rvc.infer_file(tts_path, tmp_rvc_path)
+        if finalize_audio(tmp_rvc_path, rvc_path, label):
+            print(f"    [{label}] ✓ RVC Complete: {panel_id}")
+        else:
+            raise RuntimeError("RVC output invalid")
     except Exception as e:
-        print(f"    [{lang}] ✗ RVC Error: {e}, using raw TTS fallback")
-        shutil.copy(tts_path, rvc_path)
+        print(f"    [{label}] ✗ RVC Error: {e}, using raw TTS fallback")
+        try:
+            shutil.copy(tts_path, tmp_rvc_path)
+            finalize_audio(tmp_rvc_path, rvc_path, label)
+        except Exception as copy_err:
+            print(f"    [{label}] ✗ Fallback failed: {copy_err}")
 
 # ================= 5. MAIN PIPELINE =================
 async def main():
@@ -270,6 +299,7 @@ async def main():
     detected_languages = set()
     for item in story["story"]:
         detected_languages.update(item["text"].keys())
+        detected_languages.update(item.get("intro", {}).keys())
     
     voice_map = config.get("LANGUAGES", {})
     # Fallback dictionary internally just in case a language gets called that isn't in config
@@ -289,7 +319,11 @@ async def main():
                 # Uses mapped voice, or defaults to English if missing
                 voice = voice_map.get(lang, fallback_voice)
                 await generate_audio(rvc, text, lang, voice, panel_id, config, index_path)
-    
+        
+        for lang, intro_text in scene.get("intro", {}).items():
+            if intro_text and str(intro_text).strip():
+                voice = voice_map.get(lang, fallback_voice)
+                await generate_audio(rvc, intro_text, lang, voice, panel_id, config, index_path, subdir="intro")
     print("\n✓ TTS GENERATION COMPLETE")
 
 if __name__ == "__main__":
