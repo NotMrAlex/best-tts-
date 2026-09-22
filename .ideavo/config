@@ -1,0 +1,56 @@
+{
+  "systemSetup": [
+    {
+      "name": "Install pip",
+      "command": "curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3 - --break-system-packages"
+    }
+  ],
+  "templateName": "custom",
+  "projectDependencies": [
+    {
+      "name": "Install PyTorch CPU",
+      "command": "python3 -m pip install --break-system-packages torch --index-url https://download.pytorch.org/whl/cpu"
+    },
+    {
+      "name": "Install TTS Libraries",
+      "command": "python3 -m pip install --break-system-packages edge-tts pydub"
+    },
+    {
+      "name": "Install ffmpeg Binary",
+      "command": "python3 -m pip install --break-system-packages imageio-ffmpeg && ln -sf $(python3 -c \"import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())\") /usr/local/bin/ffmpeg"
+    },
+    {
+      "name": "Install RVC Library",
+      "command": "python3 -m pip install --break-system-packages rvc-python || python3 -m pip install --break-system-packages --no-deps rvc-python faiss-cpu av ffmpeg-python loguru omegaconf praat-parselmouth torchcrepe noisereduce soundfile librosa || true"
+    }
+  ],
+  "codeChecks": [
+    {
+      "name": "Compile Check",
+      "command": "python3 -m py_compile tts_engine.py"
+    }
+  ],
+  "buildSteps": [],
+  "runStep": [
+    {
+      "name": "Run TTS Engine",
+      "command": "python3 tts_engine.py --port 3000",
+      "port": "3000"
+    }
+  ],
+  "deploySteps": [],
+  "cleanupFiles": [
+    "config_tts.json",
+    "models",
+    "temp",
+    "output",
+    "__pycache__"
+  ],
+  "packageManager": "pip",
+  "envPaths": [
+    {
+      "name": "default",
+      "path": ".env"
+    }
+  ]
+}
