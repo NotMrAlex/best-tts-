@@ -9,11 +9,11 @@
   "projectDependencies": [
     {
       "name": "Install PyTorch CPU",
-      "command": "python3 -m pip install --break-system-packages torch --index-url https://download.pytorch.org/whl/cpu"
+      "command": "python3 -m pip install --break-system-packages torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu"
     },
     {
       "name": "Install TTS Libraries",
-      "command": "python3 -m pip install --break-system-packages edge-tts pydub"
+      "command": "python3 -m pip install --break-system-packages \"edge-tts>=7.3.1\" pydub"
     },
     {
       "name": "Install ffmpeg + ffprobe",
@@ -22,6 +22,10 @@
     {
       "name": "Install RVC Library",
       "command": "python3 -m pip install --break-system-packages rvc-python || python3 -m pip install --break-system-packages --no-deps rvc-python faiss-cpu av ffmpeg-python loguru omegaconf praat-parselmouth torchcrepe noisereduce soundfile librosa || true"
+    },
+    {
+      "name": "Install Chatterbox Engine",
+      "command": "python3 -m pip install --break-system-packages chatterbox-tts==0.1.7"
     }
   ],
   "codeChecks": [
@@ -43,7 +47,7 @@
     "config_tts.json",
     "models",
     "temp",
-    "output",
+    "audio",
     "__pycache__"
   ],
   "packageManager": "pip",
