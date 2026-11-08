@@ -8,24 +8,12 @@
   "templateName": "custom",
   "projectDependencies": [
     {
-      "name": "Install PyTorch CPU",
-      "command": "python3 -m pip install --break-system-packages torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu"
-    },
-    {
-      "name": "Install TTS Libraries",
-      "command": "python3 -m pip install --break-system-packages \"edge-tts>=7.3.1\" pydub"
-    },
-    {
       "name": "Install ffmpeg + ffprobe",
       "command": "curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJf - -C /tmp && ln -sf $(ls -d /tmp/ffmpeg-*-amd64-static | head -1)/ffmpeg /usr/local/bin/ffmpeg && ln -sf $(ls -d /tmp/ffmpeg-*-amd64-static | head -1)/ffprobe /usr/local/bin/ffprobe"
     },
     {
-      "name": "Install RVC Library",
-      "command": "python3 -m pip install --break-system-packages rvc-python || python3 -m pip install --break-system-packages --no-deps rvc-python faiss-cpu av ffmpeg-python loguru omegaconf praat-parselmouth torchcrepe noisereduce soundfile librosa || true"
-    },
-    {
-      "name": "Install Chatterbox Engine",
-      "command": "python3 -m pip install --break-system-packages chatterbox-tts==0.1.7"
+      "name": "Install Python Dependencies",
+      "command": "python3 -m pip install --break-system-packages -r requirements.txt"
     }
   ],
   "codeChecks": [

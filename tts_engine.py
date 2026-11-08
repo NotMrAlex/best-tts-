@@ -31,6 +31,7 @@ if not os.path.exists(DIRS["config"]):
         "RVC_SETTINGS": {"pitch_shift": 0, "index_rate": 0.75, "method": "rmvpe"},
         "PRIMARY_ENGINE": {
             "type": "chatterbox",
+            "enabled": True,
             "languages": ["english", "en"],
             "reference_audio": "models/english_reference.wav",
             "max_chars": 350,
@@ -196,6 +197,7 @@ def runtime_defaults():
     return {
         "PRIMARY_ENGINE": {
             "type": "chatterbox",
+            "enabled": True,
             "languages": ["english", "en"],
             "reference_audio": "models/english_reference.wav",
             "max_chars": 350,
@@ -271,6 +273,8 @@ def normalize_language(lang):
 
 
 def uses_primary_engine(lang, cfg):
+    if cfg["PRIMARY_ENGINE"].get("enabled", True) is False:
+        return False
     normalized = normalize_language(lang)
     aliases = {normalize_language(item) for item in cfg["PRIMARY_ENGINE"].get("languages", [])}
     return normalized in aliases or ("-" in normalized and normalized.split("-", 1)[0] in aliases)
