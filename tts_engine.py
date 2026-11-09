@@ -1,673 +1,670 @@
-import os
-import json
+"""Local multilingual TTS pipeline.
+
+Routes each narration/intro clip to the best available engine:
+  * Kokoro (local, MIT, GPU/CPU) for English, Spanish, French, Hindi,
+    Italian, Portuguese, Japanese and Chinese.
+  * Edge-TTS (online Microsoft neural voices) for every other language and
+    as an automatic fallback whenever the local engine is unavailable.
+
+Output is mastered to mono 48 kHz 16-bit PCM WAV at a consistent loudness.
+"""
+
 import asyncio
-import glob
+import hashlib
+import json
+import os
+import re
 import shutil
 import subprocess
-import re
-import math
 
-# ================= 1. INSTANT FOLDER & FILE CREATION =================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DIRS = {
-    "config": "config_tts.json",
-    "story": "story.json",
-    "models": "models",
-    "cache_audio": "temp/cache_tts",
-    "work_audio": "temp/master_tts",
-    "final_audio": "audio"
+    "config": os.path.join(BASE_DIR, "config_tts.json"),
+    "story": os.path.join(BASE_DIR, "story.json"),
+    "cache": os.path.join(BASE_DIR, "temp", "cache_tts"),
+    "final": os.path.join(BASE_DIR, "audio"),
+}
+CACHE_VERSION = "3"
+
+# Kokoro voices confirmed present in hexgrad/Kokoro-82M.
+LOCAL_LANGUAGES = {
+    "english":    {"lang_code": "a", "voice": "af_heart"},
+    "spanish":    {"lang_code": "e", "voice": "ef_dora"},
+    "french":     {"lang_code": "f", "voice": "ff_siwis"},
+    "hindi":      {"lang_code": "h", "voice": "hf_alpha"},
+    "italian":    {"lang_code": "i", "voice": "if_sara"},
+    "portuguese": {"lang_code": "p", "voice": "pf_dora"},
+    "japanese":   {"lang_code": "j", "voice": "jf_alpha"},
+    "chinese":    {"lang_code": "z", "voice": "zf_xiaobei"},
 }
 
-print("Checking directories and files...")
-for key, path in DIRS.items():
-    if "." not in path and not os.path.exists(path): 
-        os.makedirs(path)
-        print(f"[+] Created missing folder: {path}")
+# Edge-TTS voices for every other language (fallback route).
+EDGE_VOICES = {
+    "english": "en-US-ChristopherNeural",
+    "spanish": "es-MX-JorgeNeural",
+    "hindi": "hi-IN-MadhurNeural",
+    "japanese": "ja-JP-KeitaNeural",
+    "korean": "ko-KR-InJoonNeural",
+    "french": "fr-FR-HenriNeural",
+    "german": "de-DE-ConradNeural",
+    "chinese": "zh-CN-YunxiNeural",
+    "portuguese": "pt-BR-AntonioNeural",
+    "russian": "ru-RU-DmitryNeural",
+    "arabic": "ar-SA-HamedNeural",
+    "indonesian": "id-ID-ArdiNeural",
+    "italian": "it-IT-DiegoNeural",
+    "turkish": "tr-TR-AhmetNeural",
+    "vietnamese": "vi-VN-NamMinhNeural",
+    "thai": "th-TH-NiwatNeural",
+    "polish": "pl-PL-MarekNeural",
+    "dutch": "nl-NL-MaartenNeural",
+    "filipino": "fil-PH-AngeloNeural",
+    "bengali": "bn-IN-BashkarNeural",
+    "urdu": "ur-PK-AsadNeural",
+    "tamil": "ta-IN-ValluvarNeural",
+    "telugu": "te-IN-MohanNeural",
+    "marathi": "mr-IN-ManoharNeural",
+    "gujarati": "gu-IN-NiranjanNeural",
+    "malayalam": "ml-IN-MidhunNeural",
+    "kannada": "kn-IN-GaganNeural",
+    "punjabi": "pa-IN-SalmaNeural",
+    "ukrainian": "uk-UA-OstapNeural",
+    "greek": "el-GR-NestorasNeural",
+    "czech": "cs-CZ-AntoninNeural",
+    "romanian": "ro-RO-EmilNeural",
+    "swedish": "sv-SE-MattiasNeural",
+    "hungarian": "hu-HU-TamasNeural",
+    "danish": "da-DK-JeppeNeural",
+    "finnish": "fi-FI-HarriNeural",
+    "norwegian": "nb-NO-FinnNeural",
+    "bulgarian": "bg-BG-BorislavNeural",
+    "croatian": "hr-HR-SreckoNeural",
+    "slovak": "sk-SK-LukasNeural",
+    "lithuanian": "lt-LT-LeonasNeural",
+    "slovenian": "sl-SI-RokNeural",
+    "latvian": "lv-LV-NilsNeural",
+    "estonian": "et-EE-KertNeural",
+    "serbian": "sr-RS-NicholasNeural",
+    "afrikaans": "af-ZA-WillemNeural",
+    "albanian": "sq-AL-IlirNeural",
+    "amharic": "am-ET-AmehaNeural",
+    "azerbaijani": "az-AZ-BabekNeural",
+    "bosnian": "bs-BA-GoranNeural",
+    "burmese": "my-MM-ThihaNeural",
+    "catalan": "ca-ES-EnricNeural",
+    "galician": "gl-ES-RoiNeural",
+    "georgian": "ka-GE-GiorgiNeural",
+    "hebrew": "he-IL-AvriNeural",
+    "icelandic": "is-IS-GunnarNeural",
+    "irish": "ga-IE-ColmNeural",
+    "javanese": "jv-ID-DimasNeural",
+    "kazakh": "kk-KZ-DauletNeural",
+    "khmer": "km-KH-PisethNeural",
+    "lao": "lo-LA-ChanthavongNeural",
+    "macedonian": "mk-MK-AleksandarNeural",
+    "malay": "ms-MY-OsmanNeural",
+    "maltese": "mt-MT-JosephNeural",
+    "mongolian": "mn-MN-BataaNeural",
+    "nepali": "ne-NP-SagarNeural",
+    "pashto": "ps-AF-GulNawazNeural",
+    "persian": "fa-IR-FaridNeural",
+    "sinhala": "si-LK-SameeraNeural",
+    "somali": "so-SO-MuuseNeural",
+    "sundanese": "su-ID-JajangNeural",
+    "swahili": "sw-KE-RafikiNeural",
+    "uzbek": "uz-UZ-SardorNeural",
+    "welsh": "cy-GB-AledNeural",
+    "zulu": "zu-ZA-ThembaNeural",
+}
 
-# Auto-create Config with 75 Pre-Mapped Languages
-if not os.path.exists(DIRS["config"]):
-    default_conf = {
-        "AUDIO_RATE": "+20%",
-        "AUDIO_PITCH": "+0Hz",
-        "RVC_SETTINGS": {"pitch_shift": 0, "index_rate": 0.75, "method": "rmvpe"},
-        "PRIMARY_ENGINE": {
-            "type": "chatterbox",
-            "enabled": True,
-            "languages": ["english", "en"],
-            "reference_audio": "models/english_reference.wav",
-            "max_chars": 350,
-            "crossfade_ms": 80,
-            "narration": {"exaggeration": 0.65, "cfg_weight": 0.35, "temperature": 0.8, "repetition_penalty": 1.2},
-            "intro": {"exaggeration": 0.75, "cfg_weight": 0.3, "temperature": 0.8, "repetition_penalty": 1.2}
-        },
-        "MASTERING": {
-            "highpass_hz": 75,
-            "denoise": True,
-            "denoise_db": 6,
-            "loudness_lufs": -14,
-            "true_peak_dbtp": -1.5,
-            "sample_rate": 48000
-        },
-        "EDGE_SETTINGS": {"retries": 3, "retry_delay_seconds": 2, "circuit_breaker_failures": 5},
-        "LANGUAGES": {
-            "english": "en-US-ChristopherNeural",
-            "spanish": "es-MX-JorgeNeural",
-            "hindi": "hi-IN-MadhurNeural",
-            "japanese": "ja-JP-KeitaNeural",
-            "korean": "ko-KR-InJoonNeural",
-            "french": "fr-FR-HenriNeural",
-            "german": "de-DE-ConradNeural",
-            "chinese": "zh-CN-YunxiNeural",
-            "portuguese": "pt-BR-AntonioNeural",
-            "russian": "ru-RU-DmitryNeural",
-            "arabic": "ar-SA-HamedNeural",
-            "indonesian": "id-ID-ArdiNeural",
-            "italian": "it-IT-DiegoNeural",
-            "turkish": "tr-TR-AhmetNeural",
-            "vietnamese": "vi-VN-NamMinhNeural",
-            "thai": "th-TH-NiwatNeural",
-            "polish": "pl-PL-MarekNeural",
-            "dutch": "nl-NL-MaartenNeural",
-            "filipino": "fil-PH-AngeloNeural",
-            "bengali": "bn-IN-BashkarNeural",
-            "urdu": "ur-PK-AsadNeural",
-            "tamil": "ta-IN-ValluvarNeural",
-            "telugu": "te-IN-MohanNeural",
-            "marathi": "mr-IN-ManoharNeural",
-            "gujarati": "gu-IN-NiranjanNeural",
-            "malayalam": "ml-IN-MidhunNeural",
-            "kannada": "kn-IN-GaganNeural",
-            "punjabi": "pa-IN-SalmaNeural",
-            "ukrainian": "uk-UA-OstapNeural",
-            "greek": "el-GR-NestorasNeural",
-            "czech": "cs-CZ-AntoninNeural",
-            "romanian": "ro-RO-EmilNeural",
-            "swedish": "sv-SE-MattiasNeural",
-            "hungarian": "hu-HU-TamasNeural",
-            "danish": "da-DK-JeppeNeural",
-            "finnish": "fi-FI-HarriNeural",
-            "norwegian": "nb-NO-FinnNeural",
-            "bulgarian": "bg-BG-BorislavNeural",
-            "croatian": "hr-HR-SreckoNeural",
-            "slovak": "sk-SK-LukasNeural",
-            "lithuanian": "lt-LT-LeonasNeural",
-            "slovenian": "sl-SI-RokNeural",
-            "latvian": "lv-LV-NilsNeural",
-            "estonian": "et-EE-KertNeural",
-            "serbian": "sr-RS-NicholasNeural",
-            "afrikaans": "af-ZA-WillemNeural",
-            "albanian": "sq-AL-IlirNeural",
-            "amharic": "am-ET-AmehaNeural",
-            "azerbaijani": "az-AZ-BabekNeural",
-            "bosnian": "bs-BA-GoranNeural",
-            "burmese": "my-MM-ThihaNeural",
-            "catalan": "ca-ES-EnricNeural",
-            "galician": "gl-ES-RoiNeural",
-            "georgian": "ka-GE-GiorgiNeural",
-            "hebrew": "he-IL-AvriNeural",
-            "icelandic": "is-IS-GunnarNeural",
-            "irish": "ga-IE-ColmNeural",
-            "javanese": "jv-ID-DimasNeural",
-            "kazakh": "kk-KZ-DauletNeural",
-            "khmer": "km-KH-PisethNeural",
-            "lao": "lo-LA-ChanthavongNeural",
-            "macedonian": "mk-MK-AleksandarNeural",
-            "malay": "ms-MY-OsmanNeural",
-            "maltese": "mt-MT-JosephNeural",
-            "mongolian": "mn-MN-BataaNeural",
-            "nepali": "ne-NP-SagarNeural",
-            "pashto": "ps-AF-GulNawazNeural",
-            "persian": "fa-IR-FaridNeural",
-            "sinhala": "si-LK-SameeraNeural",
-            "somali": "so-SO-MuuseNeural",
-            "sundanese": "su-ID-JajangNeural",
-            "swahili": "sw-KE-RafikiNeural",
-            "uzbek": "uz-UZ-SardorNeural",
-            "welsh": "cy-GB-AledNeural",
-            "zulu": "zu-ZA-ThembaNeural"
-        }
-    }
-    with open(DIRS["config"], "w", encoding="utf-8") as f:
-        json.dump(default_conf, f, indent=4, ensure_ascii=False)
-    print(f"[+] Created default {DIRS['config']}")
 
-if not os.path.exists(DIRS["story"]):
-    default_story = {
-        "story": [
-            {
-                "render": True,
-                "page": 1,
-                "panel": 1,
-                "shorts": 1,
-                "narration_english": "This is a test. Paste your script here!"
-            }
-        ]
-    }
-    with open(DIRS["story"], "w", encoding="utf-8") as f:
-        json.dump(default_story, f, indent=4, ensure_ascii=False)
-    print(f"[+] Created blank template for {DIRS['story']}")
-
-# ================= 2. SELF-HEALING IMPORTS =================
-try:
-    import torch
-    if not hasattr(torch.utils._pytree, "register_pytree_node"):
-        def patched_register_pytree_node(cls, flatten_fn, unflatten_fn, serialized_type_name=None):
-            return torch.utils._pytree._register_pytree_node(cls, flatten_fn, unflatten_fn)
-        torch.utils._pytree.register_pytree_node = patched_register_pytree_node
-    
-    # PyTorch 2.6+ Security Block Fix
-    original_torch_load = torch.load
-    def safe_torch_load(*args, **kwargs):
-        kwargs['weights_only'] = False
-        return original_torch_load(*args, **kwargs)
-    torch.load = safe_torch_load
-except ImportError as e:
-    raise SystemExit("PyTorch is required. Install the CPU or CUDA build appropriate for this machine.") from e
-
-try:
-    import edge_tts
-    from pydub import AudioSegment
-    from pydub.silence import split_on_silence
-except ImportError as e:
-    raise SystemExit(f"Missing dependency: {e}. Install edge-tts>=7.3.1 and pydub.") from e
-
-# ================= 3. STORY NORMALIZER =================
-def normalize_story(story_data):
-    normalized = {"story": []}
-    for item in story_data.get("story", []):
-        if item.get("render") is False:
-            continue
-            
-        scene = {"page": item.get("page", 1), "panel": item.get("panel", 1), "text": {}, "intro": {}}
-        
-        for key in item:
-            if key.startswith("narration_"):
-                lang_name = key.replace("narration_", "")
-                if item[key] and str(item[key]).strip():
-                    scene["text"][lang_name] = item[key]
-            elif key.startswith("intro_"):
-                lang_name = key.replace("intro_", "")
-                if item[key] and str(item[key]).strip():
-                    scene["intro"][lang_name] = item[key]
-        
-        normalized["story"].append(scene)
-    return normalized
-
-# ================= 4. TTS + RVC GENERATION =================
-def runtime_defaults():
+def defaults():
     return {
-        "PRIMARY_ENGINE": {
-            "type": "chatterbox",
-            "enabled": True,
-            "languages": ["english", "en"],
-            "reference_audio": "models/english_reference.wav",
-            "max_chars": 350,
-            "crossfade_ms": 80,
-            "narration": {"exaggeration": 0.65, "cfg_weight": 0.35, "temperature": 0.8, "repetition_penalty": 1.2},
-            "intro": {"exaggeration": 0.75, "cfg_weight": 0.3, "temperature": 0.8, "repetition_penalty": 1.2}
-        },
+        "AUDIO_RATE": "+0%",
+        "AUDIO_PITCH": "+0Hz",
+        "LOCAL": {"enabled": True, "speed": 1.0, "languages": LOCAL_LANGUAGES},
         "MASTERING": {
             "highpass_hz": 75,
-            "denoise": True,
-            "denoise_db": 6,
             "loudness_lufs": -14,
             "true_peak_dbtp": -1.5,
-            "sample_rate": 48000
+            "sample_rate": 48000,
         },
-        "EDGE_SETTINGS": {"retries": 3, "retry_delay_seconds": 2, "circuit_breaker_failures": 5}
+        "EDGE_SETTINGS": {
+            "retries": 3,
+            "retry_delay_seconds": 2,
+            "concurrency": 6,
+            "timeout_seconds": 60,
+        },
+        "LANGUAGES": dict(EDGE_VOICES),
     }
 
 
-def merge_defaults(config, defaults):
-    for key, value in defaults.items():
-        if isinstance(value, dict):
-            target = config.setdefault(key, {})
-            if isinstance(target, dict):
-                merge_defaults(target, value)
-        else:
-            config.setdefault(key, value)
+def merge_defaults(config, fallback):
+    for key, value in fallback.items():
+        if key not in config:
+            config[key] = value
+        elif isinstance(value, dict) and isinstance(config[key], dict):
+            merge_defaults(config[key], value)
     return config
 
 
-def require_audio_tools():
+def load_config():
+    if not os.path.isfile(DIRS["config"]):
+        config = defaults()
+        with open(DIRS["config"], "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        print(f"Created default {DIRS['config']}")
+        return config
+    with open(DIRS["config"], encoding="utf-8") as f:
+        config = json.load(f)
+    return merge_defaults(config, defaults())
+
+
+def load_story():
+    if not os.path.isfile(DIRS["story"]):
+        template = {
+            "story": [{
+                "render": True,
+                "page": 1,
+                "panel": 1,
+                "narration_english": "This is a test. Paste your script here!",
+                "narration_spanish": "Esta es una prueba. ¡Pega tu guion aquí!",
+            }]
+        }
+        with open(DIRS["story"], "w", encoding="utf-8") as f:
+            json.dump(template, f, indent=4, ensure_ascii=False)
+        print(f"Created blank template {DIRS['story']}")
+        return template
+    with open(DIRS["story"], encoding="utf-8") as f:
+        return json.load(f)
+
+
+def require_ffmpeg():
     missing = [tool for tool in ("ffmpeg", "ffprobe") if not shutil.which(tool)]
     if missing:
-        raise RuntimeError(f"Missing required audio tools: {', '.join(missing)}")
+        raise SystemExit(
+            "FFmpeg/FFprobe are required but not found on PATH. "
+            "Install FFmpeg (https://ffmpeg.org) and re-run."
+        )
 
 
-def probe_audio(path):
-    result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,sample_rate,channels:format=duration", "-of", "json", path],
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        raise ValueError(result.stderr.strip() or "ffprobe could not decode audio")
-    data = json.loads(result.stdout)
-    streams = data.get("streams", [])
-    if not streams:
-        raise ValueError("No audio stream found")
-    return streams[0], float(data.get("format", {}).get("duration", 0))
+def detect_device():
+    try:
+        import torch
+    except ImportError:
+        return "cpu", False
+    if torch.cuda.is_available():
+        return "cuda", True
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps", True
+    return "cpu", False
 
 
-def validate_audio(path, mastered_sample_rate=None):
-    if not os.path.isfile(path) or os.path.getsize(path) == 0:
-        raise ValueError("Audio file is missing or empty")
-    stream, duration = probe_audio(path)
-    if not math.isfinite(duration) or duration < 0.1:
-        raise ValueError("Audio is empty or shorter than 100ms")
-    if mastered_sample_rate is not None:
-        if stream.get("codec_name") != "pcm_s16le":
-            raise ValueError("Final audio must be 16-bit PCM WAV")
-        if int(stream.get("sample_rate", 0)) != mastered_sample_rate or int(stream.get("channels", 0)) != 1:
-            raise ValueError("Final audio must be mono at the configured sample rate")
-    audio = AudioSegment.from_file(path)
-    if len(audio) < 100 or not math.isfinite(audio.dBFS) or audio.dBFS < -60:
-        raise ValueError("Audio is silent or too short")
-    if mastered_sample_rate is not None and audio.max_dBFS > -0.1:
-        raise ValueError("Final audio contains clipped peaks")
-    return duration
-
-
+# --------------------------------------------------------------------------- #
+# Story -> jobs
+# --------------------------------------------------------------------------- #
 def normalize_language(lang):
     return str(lang).strip().lower().replace("_", "-")
 
 
-def uses_primary_engine(lang, cfg):
-    if cfg["PRIMARY_ENGINE"].get("enabled", True) is False:
-        return False
-    normalized = normalize_language(lang)
-    aliases = {normalize_language(item) for item in cfg["PRIMARY_ENGINE"].get("languages", [])}
-    return normalized in aliases or ("-" in normalized and normalized.split("-", 1)[0] in aliases)
-
-
-def job_paths(job):
-    parts = [job["lang"]]
-    if job["kind"] == "intro":
-        parts.append("intro")
-    final_dir = os.path.join(DIRS["final_audio"], *parts)
-    source_dir = os.path.join(DIRS["work_audio"], job["engine"], *parts)
-    cache_dir = os.path.join(DIRS["cache_audio"], *parts)
-    return {
-        "final": os.path.join(final_dir, f"{job['panel_id']}.wav"),
-        "source": os.path.join(source_dir, f"{job['panel_id']}.source.wav"),
-        "master_tmp": os.path.join(final_dir, f"{job['panel_id']}.tmp.wav"),
-        "edge_cache": os.path.join(cache_dir, f"{job['panel_id']}.mp3"),
-        "edge_smooth": os.path.join(source_dir, f"{job['panel_id']}.edge.wav")
-    }
-
-
-def build_jobs(story, cfg):
-    jobs = []
-    voice_map = cfg.get("LANGUAGES", {})
-    for scene_index, scene in enumerate(story["story"], 1):
-        page, panel = str(scene["page"]), str(scene["panel"])
-        panel_id = f"{page}_{panel}"
-        if not re.fullmatch(r"\d+_\d+", panel_id):
-            print(f"[!] Scene {scene_index}: invalid page/panel '{panel_id}', skipped")
+def normalize_story(story):
+    scenes = []
+    for item in story.get("story", []):
+        if item.get("render") is False:
             continue
-        for field, kind in (("text", "narration"), ("intro", "intro")):
-            for lang in sorted(scene.get(field, {})):
-                text = str(scene[field][lang]).strip()
-                if not text:
-                    continue
-                if not re.fullmatch(r"[A-Za-z0-9-]+", lang):
-                    print(f"[!] Scene {scene_index}: invalid language '{lang}', skipped")
-                    continue
-                primary = uses_primary_engine(lang, cfg)
+        scene = {
+            "page": str(item.get("page", 1)),
+            "panel": str(item.get("panel", 1)),
+            "narration": {},
+            "intro": {},
+        }
+        for key, value in item.items():
+            text = str(value).strip() if isinstance(value, str) else ""
+            if not text:
+                continue
+            if key.startswith("narration_"):
+                scene["narration"][key[len("narration_"):]] = text
+            elif key.startswith("intro_"):
+                scene["intro"][key[len("intro_"):]] = text
+        scenes.append(scene)
+    return scenes
+
+
+def build_jobs(scenes, config):
+    jobs = []
+    local_langs = {normalize_language(k): v for k, v in config["LOCAL"]["languages"].items()}
+    edge_voices = config["LANGUAGES"]
+
+    for scene in scenes:
+        panel_id = f"{scene['page']}_{scene['panel']}"
+        if not re.fullmatch(r"\d+_\d+", panel_id):
+            raise ValueError(f"Invalid page/panel for scene, skipping render of: {panel_id}")
+
+        for field, kind in (("narration", "narration"), ("intro", "intro")):
+            for lang, text in scene[field].items():
+                norm = normalize_language(lang)
+                edge_voice = edge_voices.get(lang) or edge_voices.get(norm)
+                use_local = config["LOCAL"].get("enabled", True) and norm in local_langs
+                voice = local_langs[norm]["voice"] if use_local else edge_voice
                 jobs.append({
-                    "scene": scene_index,
                     "panel_id": panel_id,
                     "lang": lang,
+                    "norm": norm,
                     "kind": kind,
                     "text": text,
-                    "voice": voice_map.get(lang) or voice_map.get(normalize_language(lang)),
-                    "engine": "chatterbox" if primary else "edge_rvc"
+                    "engine": "local" if use_local else "edge",
+                    "voice": voice,
+                    "lang_code": local_langs[norm]["lang_code"] if use_local else None,
                 })
     return jobs
 
 
-def chunk_text(text, max_chars):
-    text = " ".join(text.split())
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    pieces = []
-    for sentence in sentences:
-        while len(sentence) > max_chars:
-            cut = sentence.rfind(" ", 0, max_chars + 1)
-            if cut < 1:
-                cut = max_chars
-            pieces.append(sentence[:cut].strip())
-            sentence = sentence[cut:].strip()
-        if sentence:
-            pieces.append(sentence)
-    chunks = []
-    current = ""
-    for piece in pieces:
-        candidate = f"{current} {piece}".strip()
-        if current and len(candidate) > max_chars:
-            chunks.append(current)
-            current = piece
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
+def ensure_unique(jobs):
+    seen = {}
+    result = []
+    for job in jobs:
+        key = (job["lang"], job["kind"], job["panel_id"])
+        if key in seen:
+            raise ValueError(f"Duplicate narration for {key[0]}/{key[1]} {key[2]}")
+        seen[key] = True
+        result.append(job)
+    return result
 
 
-def join_waveforms(chunks, sample_rate, crossfade_ms):
-    result = chunks[0].detach().cpu().flatten()
-    fade_samples = int(sample_rate * crossfade_ms / 1000)
-    for chunk in chunks[1:]:
-        chunk = chunk.detach().cpu().flatten()
-        count = min(fade_samples, len(result), len(chunk))
-        if count < 2:
-            result = torch.cat((result, chunk))
-            continue
-        positions = torch.linspace(0, math.pi / 2, count, dtype=result.dtype)
-        overlap = result[-count:] * torch.cos(positions).square() + chunk[:count] * torch.sin(positions).square()
-        result = torch.cat((result[:-count], overlap, chunk[count:]))
-    return torch.clamp(result, -1.0, 1.0)
+# --------------------------------------------------------------------------- #
+# Paths + caching
+# --------------------------------------------------------------------------- #
+def job_paths(job):
+    parts = [job["lang"]]
+    if job["kind"] == "intro":
+        parts.append("intro")
+    final_dir = os.path.join(DIRS["final"], *parts)
+    return {
+        "final": os.path.join(final_dir, f"{job['panel_id']}.wav"),
+        "master_tmp": os.path.join(final_dir, f"{job['panel_id']}.tmp.wav"),
+        "edge_cache": os.path.join(DIRS["cache"], *parts, f"{job['panel_id']}.mp3"),
+        "local_src": os.path.join(DIRS["cache"], "_src", f"{job['lang']}_{job['panel_id']}.wav"),
+    }
 
 
-def loudnorm_filter(settings, measurements=None):
+def job_hash(job, config, edge_voice):
+    token = json.dumps({
+        "v": CACHE_VERSION,
+        "lang": job["lang"],
+        "kind": job["kind"],
+        "panel": job["panel_id"],
+        "text": job["text"],
+        "engine": job["engine"],
+        "voice": job["voice"],
+        "lang_code": job["lang_code"],
+        "rate": config["AUDIO_RATE"],
+        "pitch": config["AUDIO_PITCH"],
+        "local_speed": config["LOCAL"].get("speed", 1.0),
+        "mastering": config["MASTERING"],
+        "edge_voice": edge_voice,
+    }, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def load_manifest():
+    path = os.path.join(DIRS["cache"], "manifest.json")
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("entries", {})
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_manifest(entries):
+    os.makedirs(DIRS["cache"], exist_ok=True)
+    tmp = os.path.join(DIRS["cache"], "manifest.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"version": CACHE_VERSION, "entries": entries}, f)
+    os.replace(tmp, os.path.join(DIRS["cache"], "manifest.json"))
+
+
+# --------------------------------------------------------------------------- #
+# Audio helpers
+# --------------------------------------------------------------------------- #
+def run_ffmpeg(args, timeout=120):
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-y", *args],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-1500:] or "ffmpeg failed")
+    return result
+
+
+def probe(path):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "stream=codec_name,sample_rate,channels:format=duration",
+         "-of", "json", path],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffprobe could not decode audio")
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+    if not streams:
+        raise RuntimeError("No audio stream found")
+    duration = float(data.get("format", {}).get("duration", 0) or 0)
+    return streams[0], duration
+
+
+def validate_wav(path, sample_rate):
+    import numpy as np
+    import soundfile as sf
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        raise RuntimeError("Audio file missing or empty")
+    info = sf.info(path)
+    if info.samplerate != sample_rate or info.channels != 1:
+        raise RuntimeError("Final audio must be mono at the configured sample rate")
+    data, _ = sf.read(path, dtype="float32", always_2d=False)
+    if data.size == 0 or info.duration < 0.1:
+        raise RuntimeError("Audio too short")
+    peak = float(np.max(np.abs(data)))
+    if peak < 1e-3:
+        raise RuntimeError("Audio is silent")
+    if peak > 1.0:
+        raise RuntimeError("Audio is clipped")
+    return info.duration
+
+
+def master_audio(source_path, final_path, config):
+    settings = config["MASTERING"]
+    sample_rate = int(settings["sample_rate"])
+    highpass = int(settings["highpass_hz"])
     loudness = settings["loudness_lufs"]
     peak = settings["true_peak_dbtp"]
+
     base = f"loudnorm=I={loudness}:TP={peak}:LRA=11"
-    if measurements is None:
-        return base + ":print_format=json"
-    values = {
-        "measured_I": measurements["input_i"],
-        "measured_LRA": measurements["input_lra"],
-        "measured_TP": measurements["input_tp"],
-        "measured_thresh": measurements["input_thresh"],
-        "offset": measurements["target_offset"]
-    }
-    return base + ":" + ":".join(f"{key}={value}" for key, value in values.items()) + ":linear=true"
+    filters = f"highpass=f={highpass}" if highpass > 0 else "anull"
 
-
-def mastering_filters(settings):
-    filters = [f"highpass=f={settings['highpass_hz']}"]
-    if settings.get("denoise", True):
-        filters.append(f"afftdn=nr={settings['denoise_db']}:nf=-50")
-    filters.extend([
-        "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-50dB:start_silence=0.08",
-        "areverse",
-        "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-50dB:start_silence=0.12",
-        "areverse"
-    ])
-    return ",".join(filters)
-
-
-def master_audio(source_path, final_path, tmp_path, cfg):
-    settings = cfg["MASTERING"]
-    sample_rate = int(settings["sample_rate"])
-    filters = mastering_filters(settings)
-    validate_audio(source_path)
-    os.makedirs(os.path.dirname(final_path), exist_ok=True)
-    if os.path.exists(tmp_path):
-        os.remove(tmp_path)
-    try:
-        measured = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-nostats", "-i", source_path, "-af", filters + "," + loudnorm_filter(settings), "-f", "null", "-"],
-            capture_output=True,
-            text=True
-        )
-        if measured.returncode != 0:
-            raise RuntimeError(measured.stderr[-1500:])
-        blocks = re.findall(r"\{[^{}]+\}", measured.stderr)
-        measurements = None
-        for block in reversed(blocks):
+    # Pass 1: measure loudness.
+    result = run_ffmpeg(
+        ["-i", source_path, "-af", f"{filters},{base}:print_format=json", "-f", "null", "-"]
+    )
+    blocks = re.findall(r"\{[^{}]+\}", result.stderr)
+    measurement = None
+    for block in reversed(blocks):
+        try:
             candidate = json.loads(block)
-            if "input_i" in candidate:
-                measurements = candidate
-                break
-        if measurements is None:
-            raise RuntimeError("FFmpeg did not return loudness measurements")
-        second_filter = filters + "," + loudnorm_filter(settings, measurements)
-        rendered = subprocess.run(
-            ["ffmpeg", "-y", "-hide_banner", "-i", source_path, "-af", second_filter, "-ar", str(sample_rate), "-ac", "1", "-c:a", "pcm_s16le", tmp_path],
-            capture_output=True,
-            text=True
-        )
-        if rendered.returncode != 0:
-            raise RuntimeError(rendered.stderr[-1500:])
-        validate_audio(tmp_path, sample_rate)
-        os.replace(tmp_path, final_path)
+        except json.JSONDecodeError:
+            continue
+        if "input_i" in candidate:
+            measurement = candidate
+            break
+    if measurement is None:
+        raise RuntimeError("FFmpeg returned no loudness measurement")
+
+    linear = (f"{base}:measured_I={measurement['input_i']}"
+              f":measured_LRA={measurement['input_lra']}"
+              f":measured_TP={measurement['input_tp']}"
+              f":measured_thresh={measurement['input_thresh']}"
+              f":offset={measurement['target_offset']}:linear=true")
+
+    stem = os.path.splitext(final_path)[0]
+    tmp = f"{stem}.tmp.wav"
+    os.makedirs(os.path.dirname(final_path), exist_ok=True)
+    try:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        run_ffmpeg([
+            "-i", source_path, "-af", f"{filters},{linear}",
+            "-ar", str(sample_rate), "-ac", "1", "-c:a", "pcm_s16le", tmp,
+        ])
+        validate_wav(tmp, sample_rate)
+        os.replace(tmp, final_path)
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
-class ChatterboxEngine:
-    def __init__(self, device, cfg):
-        self.settings = cfg["PRIMARY_ENGINE"]
-        reference = self.settings["reference_audio"]
-        if not os.path.isfile(reference):
-            raise FileNotFoundError(f"English reference audio not found: {reference}")
-        reference_duration = validate_audio(reference)
-        if not 3 <= reference_duration <= 15:
-            raise ValueError("English reference audio must be between 3 and 15 seconds")
-        from chatterbox.tts import ChatterboxTTS
-        import torchaudio
-        self.torchaudio = torchaudio
-        selected_device = "cuda" if device.startswith("cuda") else "cpu"
-        self.model = ChatterboxTTS.from_pretrained(device=selected_device)
-        self.model.prepare_conditionals(reference, exaggeration=self.settings["narration"]["exaggeration"])
-
-    def generate(self, job, cfg):
-        paths = job["paths"]
-        os.makedirs(os.path.dirname(paths["source"]), exist_ok=True)
-        settings = self.settings[job["kind"]]
+# --------------------------------------------------------------------------- #
+# Local engine (Kokoro)
+# --------------------------------------------------------------------------- #
+class LocalEngine:
+    def __init__(self, device, config):
         try:
-            chunks = chunk_text(job["text"], int(self.settings["max_chars"]))
-            generated = [
-                self.model.generate(
-                    chunk,
-                    exaggeration=settings["exaggeration"],
-                    cfg_weight=settings["cfg_weight"],
-                    temperature=settings["temperature"],
-                    repetition_penalty=settings["repetition_penalty"]
-                )
-                for chunk in chunks
-            ]
-            waveform = join_waveforms(generated, self.model.sr, int(self.settings["crossfade_ms"]))
-            self.torchaudio.save(paths["source"], waveform.unsqueeze(0), self.model.sr)
-            master_audio(paths["source"], paths["final"], paths["master_tmp"], cfg)
+            from kokoro import KPipeline, KModel
+        except Exception as exc:
+            raise RuntimeError(f"Kokoro not installed: {exc}") from exc
+        self.kokoro_device = "cuda" if device == "cuda" else "cpu"
+        self.speed = float(config["LOCAL"].get("speed", 1.0))
+        self.KPipeline = KPipeline
+        self.pipelines = {}
+        self._failed = set()
+        try:
+            # One shared model keeps GPU/CPU memory flat across languages.
+            self.model = KModel(repo_id="hexgrad/Kokoro-82M").to(self.kokoro_device).eval()
+        except BaseException as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            raise RuntimeError(f"Kokoro model load failed: {exc}") from exc
+
+    def _pipeline(self, lang_code):
+        if lang_code in self._failed:
+            raise RuntimeError(f"Kokoro language '{lang_code}' unavailable")
+        if lang_code not in self.pipelines:
+            try:
+                self.pipelines[lang_code] = self.KPipeline(lang_code=lang_code, model=self.model)
+            except BaseException as exc:
+                if isinstance(exc, KeyboardInterrupt):
+                    raise
+                self._failed.add(lang_code)
+                raise RuntimeError(f"Kokoro language '{lang_code}' unavailable: {exc}") from exc
+        return self.pipelines[lang_code]
+
+    def generate(self, job, config):
+        import numpy as np
+        import soundfile as sf
+        import torch
+        try:
+            pipe = self._pipeline(job["lang_code"])
+            chunks = []
+            for result in pipe(job["text"], voice=job["voice"], speed=self.speed):
+                audio = result.audio
+                if audio is None:
+                    continue
+                chunks.append(audio.detach().cpu())
+            if not chunks:
+                raise RuntimeError("Local engine produced no audio")
+            wave = torch.cat(chunks).float().numpy()
+            wave = np.clip(wave, -1.0, 1.0)
+            src = job["paths"]["local_src"]
+            os.makedirs(os.path.dirname(src), exist_ok=True)
+            sf.write(src, wave, 24000)
+            master_audio(src, job["paths"]["final"], config)
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
         finally:
-            if os.path.exists(paths["source"]):
-                os.remove(paths["source"])
-
-    def release(self):
-        self.model = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            if os.path.exists(job["paths"]["local_src"]):
+                os.remove(job["paths"]["local_src"])
 
 
-class EdgeCircuit:
-    def __init__(self, limit):
-        self.limit = limit
-        self.failures = 0
-
-    @property
-    def blocked(self):
-        return self.failures >= self.limit
-
-    def success(self):
-        self.failures = 0
-
-    def failure(self):
-        self.failures += 1
-
-
-async def generate_edge_base(job, cfg):
-    paths = job["paths"]
-    cache_path = paths["edge_cache"]
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
-        try:
-            validate_audio(cache_path)
-            return
-        except Exception:
-            os.remove(cache_path)
-    settings = cfg["EDGE_SETTINGS"]
-    attempts = int(settings["retries"])
-    delay = float(settings["retry_delay_seconds"])
-    last_error = None
-    for attempt in range(1, attempts + 1):
-        try:
-            communicate = edge_tts.Communicate(job["text"], job["voice"], rate=cfg["AUDIO_RATE"], pitch=cfg["AUDIO_PITCH"])
-            await communicate.save(cache_path)
-            validate_audio(cache_path)
-            return
-        except Exception as e:
-            last_error = e
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-            if attempt < attempts:
-                await asyncio.sleep(delay * (2 ** (attempt - 1)))
-    raise RuntimeError(f"Edge-TTS failed after {attempts} attempts: {last_error}")
-
-
-def smooth_edge_audio(job):
-    paths = job["paths"]
-    os.makedirs(os.path.dirname(paths["edge_smooth"]), exist_ok=True)
-    audio = AudioSegment.from_mp3(paths["edge_cache"])
-    chunks = split_on_silence(audio, min_silence_len=200, silence_thresh=audio.dBFS - 16, keep_silence=150)
-    if chunks:
-        audio = sum(chunks)
-    audio = AudioSegment.silent(duration=150) + audio + AudioSegment.silent(duration=150)
-    audio.export(paths["edge_smooth"], format="wav", parameters=["-c:a", "pcm_s16le"])
-    validate_audio(paths["edge_smooth"])
-
-
-async def generate_fallback(job, rvc, index_path, cfg, circuit):
-    if not job["voice"]:
-        raise RuntimeError(f"No Edge-TTS voice configured for language '{job['lang']}'")
-    if circuit.blocked:
-        raise RuntimeError("Edge-TTS circuit breaker is open after repeated failures")
+def kokoro_available():
     try:
-        await generate_edge_base(job, cfg)
+        import kokoro  # noqa: F401
+        return True
     except Exception:
-        circuit.failure()
-        raise
-    circuit.success()
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# Edge-TTS
+# --------------------------------------------------------------------------- #
+async def edge_generate(job, config):
+    import edge_tts
     paths = job["paths"]
-    settings = cfg.get("RVC_SETTINGS", {})
-    try:
-        smooth_edge_audio(job)
-        if index_path:
-            rvc.index_file = index_path
-        rvc.set_params(
-            f0method=settings.get("method", "rmvpe"),
-            pitch=settings.get("pitch_shift", 0),
-            index_rate=settings.get("index_rate", 0.75)
-        )
-        await asyncio.to_thread(rvc.infer_file, paths["edge_smooth"], paths["source"])
-        master_audio(paths["source"], paths["final"], paths["master_tmp"], cfg)
-    finally:
-        for key in ("source", "edge_smooth"):
-            if os.path.exists(paths[key]):
-                os.remove(paths[key])
+    cache = paths["edge_cache"]
+    if os.path.isfile(cache) and os.path.getsize(cache) > 0:
+        return cache
+
+    settings = config["EDGE_SETTINGS"]
+    retries = max(1, int(settings["retries"]))
+    delay = max(0.0, float(settings["retry_delay_seconds"]))
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+
+    last_error = None
+    for attempt in range(retries):
+        try:
+            communicate = edge_tts.Communicate(
+                job["text"], job["voice"], rate=config["AUDIO_RATE"], pitch=config["AUDIO_PITCH"]
+            )
+            await communicate.save(cache)
+            probe(cache)
+            return cache
+        except Exception as exc:
+            last_error = exc
+            if os.path.exists(cache):
+                os.remove(cache)
+            if attempt < retries - 1:
+                await asyncio.sleep(delay * (2 ** attempt))
+    raise RuntimeError(f"Edge-TTS failed: {last_error}")
 
 
-def load_rvc(device):
-    from rvc_python.infer import RVCInference
-    model_files = sorted(glob.glob(os.path.join(DIRS["models"], "*.pth")))
-    if not model_files:
-        raise FileNotFoundError("Fallback jobs require an RVC .pth model inside models/")
-    rvc = RVCInference(device=device)
-    rvc.load_model(model_files[0])
-    index_files = sorted(glob.glob(os.path.join(DIRS["models"], "*.index")))
-    return rvc, index_files[0] if index_files else None
+async def generate_edge_job(job, config):
+    if not job["voice"]:
+        raise RuntimeError(f"No voice configured for language '{job['lang']}'")
+    source = await edge_generate(job, config)
+    await asyncio.to_thread(master_audio, source, job["paths"]["final"], config)
 
 
-# ================= 5. MAIN PIPELINE =================
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 async def main():
     print("=" * 60)
-    print("DANK ENGINE - TTS COMPLETE")
+    print("TTS PIPELINE")
     print("=" * 60)
-    require_audio_tools()
-    with open(DIRS["config"], "r", encoding="utf-8") as f:
-        config = json.load(f)
-    merge_defaults(config, runtime_defaults())
-    with open(DIRS["config"], "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
-    with open(DIRS["story"], "r", encoding="utf-8") as f:
-        raw_story = json.load(f)
-    story = normalize_story(raw_story)
-    print(f"\n[✓] Loaded {len(story['story'])} renderable scenes from story.json")
-    jobs = build_jobs(story, config)
+
+    require_ffmpeg()
+    device, accelerated = detect_device()
+
+    config = load_config()
+    scenes = normalize_story(load_story())
+    jobs = ensure_unique(build_jobs(scenes, config))
+    print(f"Loaded {len(scenes)} scenes -> {len(jobs)} audio clips")
+
+    manifest = load_manifest()
+
     pending = []
     cached = 0
     sample_rate = int(config["MASTERING"]["sample_rate"])
     for job in jobs:
+        edge_voice = (config["LANGUAGES"].get(job["lang"])
+                      or config["LANGUAGES"].get(job["norm"]))
         job["paths"] = job_paths(job)
-        final_path = job["paths"]["final"]
-        try:
-            validate_audio(final_path, sample_rate)
-            print(f"    [{job['lang']}/{job['kind']}] ✓ {job['panel_id']} (cached)")
-            cached += 1
-        except Exception:
-            if os.path.exists(final_path):
-                os.remove(final_path)
-            pending.append(job)
-    primary_jobs = [job for job in pending if job["engine"] == "chatterbox"]
-    fallback_jobs = [job for job in pending if job["engine"] == "edge_rvc"]
-    print(f"[✓] Chatterbox English: {len(primary_jobs)} pending | Edge-TTS + RVC: {len(fallback_jobs)} pending")
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    print(f"[✓] Using hardware: {device.upper()}")
-    generated = 0
+        job["hash"] = job_hash(job, config, edge_voice)
+        job["edge_voice"] = edge_voice
+        if job["engine"] == "edge":
+            job["voice"] = edge_voice
+        rel = os.path.relpath(job["paths"]["final"], BASE_DIR)
+        if (manifest.get(rel) == job["hash"] and os.path.isfile(job["paths"]["final"])):
+            try:
+                validate_wav(job["paths"]["final"], sample_rate)
+                cached += 1
+                continue
+            except Exception:
+                pass
+        pending.append(job)
+
+    print(f"Cached: {cached} | To generate: {len(pending)}")
+
+    local_ok = kokoro_available() if pending else False
+    if accelerated:
+        print(f"Hardware: {device.upper()} (accelerated)")
+    else:
+        print(f"Hardware: {device.upper()} (CPU)")
+
+    # Split by engine.
+    local_jobs = [j for j in pending if j["engine"] == "local"]
+    edge_jobs = [j for j in pending if j["engine"] == "edge"]
+
+    local_engine = None
+    if local_jobs:
+        if local_ok and config["LOCAL"].get("enabled", True):
+            try:
+                local_engine = LocalEngine(device, config)
+            except Exception as exc:
+                print(f"[!] Local engine unavailable, using Edge voices: {exc}")
+                local_engine = None
+        else:
+            local_ok = False
+
     failures = []
+    generated = 0
+    saves = 0
 
-    def fail(job, error):
-        message = f"{job['lang']}/{job['kind']} {job['panel_id']}: {error}"
-        failures.append(message)
-        print(f"    [{job['lang']}/{job['kind']}] ✗ {job['panel_id']}: {error}")
+    def record():
+        nonlocal saves
+        saves += 1
+        if saves % 25 == 0:
+            save_manifest(manifest)
 
-    if primary_jobs:
-        engine = None
+    # Generate local jobs; fall back to Edge on failure.
+    to_edge = []
+    for job in local_jobs:
+        if local_engine is None:
+            if job["edge_voice"]:
+                job["engine"] = "edge"
+                job["voice"] = job["edge_voice"]
+                to_edge.append(job)
+            else:
+                failures.append(f"{job['lang']}/{job['kind']} {job['panel_id']}: no local or Edge voice")
+            continue
         try:
-            engine = ChatterboxEngine(device, config)
-            for job in primary_jobs:
-                print(f"    [{job['lang']}/{job['kind']}] Chatterbox: {job['panel_id']}")
-                try:
-                    await asyncio.to_thread(engine.generate, job, config)
-                    generated += 1
-                except Exception as e:
-                    fail(job, e)
-        except Exception as e:
-            for job in primary_jobs:
-                if not os.path.exists(job["paths"]["final"]):
-                    fail(job, f"Chatterbox initialization failed: {e}")
-        finally:
-            if engine is not None:
-                engine.release()
+            await asyncio.to_thread(local_engine.generate, job, config)
+            generated += 1
+            print(f"  ok  local  {job['lang']}/{job['kind']} {job['panel_id']}")
+            rel = os.path.relpath(job["paths"]["final"], BASE_DIR)
+            manifest[rel] = job["hash"]
+            record()
+        except Exception as exc:
+            print(f"  retry-edge {job['lang']}/{job['kind']} {job['panel_id']}: {exc}")
+            if job["edge_voice"]:
+                job["engine"] = "edge"
+                job["voice"] = job["edge_voice"]
+                to_edge.append(job)
+            else:
+                failures.append(f"{job['lang']}/{job['kind']} {job['panel_id']}: {exc}")
 
-    if fallback_jobs:
-        try:
-            rvc, index_path = load_rvc(device)
-            circuit = EdgeCircuit(int(config["EDGE_SETTINGS"]["circuit_breaker_failures"]))
-            for job in fallback_jobs:
-                print(f"    [{job['lang']}/{job['kind']}] Edge-TTS + RVC: {job['panel_id']}")
-                try:
-                    await generate_fallback(job, rvc, index_path, config, circuit)
-                    generated += 1
-                except Exception as e:
-                    fail(job, e)
-        except Exception as e:
-            for job in fallback_jobs:
-                if not os.path.exists(job["paths"]["final"]):
-                    fail(job, f"RVC initialization failed: {e}")
+    edge_jobs.extend(to_edge)
 
-    print("\n" + "=" * 60)
+    # Edge jobs run concurrently with a bounded pool.
+    if edge_jobs:
+        sem = asyncio.Semaphore(max(1, int(config["EDGE_SETTINGS"]["concurrency"])))
+        async def edge_worker(job):
+            nonlocal generated
+            async with sem:
+                try:
+                    await generate_edge_job(job, config)
+                    generated += 1
+                    print(f"  ok  edge   {job['lang']}/{job['kind']} {job['panel_id']}")
+                    rel = os.path.relpath(job["paths"]["final"], BASE_DIR)
+                    manifest[rel] = job["hash"]
+                    record()
+                except Exception as exc:
+                    failures.append(f"{job['lang']}/{job['kind']} {job['panel_id']}: {exc}")
+                    print(f"  FAIL edge   {job['lang']}/{job['kind']} {job['panel_id']}: {exc}")
+        await asyncio.gather(*(edge_worker(j) for j in edge_jobs))
+
+    save_manifest(manifest)
+
+    print("=" * 60)
     print(f"Generated: {generated} | Cached: {cached} | Failed: {len(failures)}")
     if failures:
-        print("Failed audio:")
-        for message in failures[:30]:
+        for message in failures[:40]:
             print(f"  - {message}")
-        if len(failures) > 30:
-            print(f"  ... and {len(failures) - 30} more")
+        if len(failures) > 40:
+            print(f"  ... and {len(failures) - 40} more")
         raise SystemExit(1)
-    print("✓ TTS GENERATION COMPLETE")
+    print("Complete.")
 
 
 if __name__ == "__main__":

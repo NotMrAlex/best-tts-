@@ -1,13 +1,10 @@
 .ideavo/project
 *.log
 config_tts.json
-models/
 audio/
 temp/
 __pycache__/
 venv/
 .venv/
 tts_env/
-rvc_env/
-*.mp3
 *.wav

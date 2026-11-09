@@ -26,14 +26,11 @@
   "runStep": [
     {
       "name": "Run TTS Engine",
-      "command": "python3 tts_engine.py --port 3000",
-      "port": "3000"
+      "command": "python3 tts_engine.py"
     }
   ],
   "deploySteps": [],
   "cleanupFiles": [
-    "config_tts.json",
-    "models",
     "temp",
     "audio",
     "__pycache__"

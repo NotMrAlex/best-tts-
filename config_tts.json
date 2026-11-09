@@ -1,10 +1,31 @@
 {
-    "AUDIO_RATE": "+20%",
+    "AUDIO_RATE": "+0%",
     "AUDIO_PITCH": "+0Hz",
-    "RVC_SETTINGS": {
-        "pitch_shift": 0,
-        "index_rate": 0.75,
-        "method": "rmvpe"
+    "LOCAL": {
+        "enabled": true,
+        "speed": 1.0,
+        "languages": {
+            "english": {"lang_code": "a", "voice": "af_heart"},
+            "spanish": {"lang_code": "e", "voice": "ef_dora"},
+            "french": {"lang_code": "f", "voice": "ff_siwis"},
+            "hindi": {"lang_code": "h", "voice": "hf_alpha"},
+            "italian": {"lang_code": "i", "voice": "if_sara"},
+            "portuguese": {"lang_code": "p", "voice": "pf_dora"},
+            "japanese": {"lang_code": "j", "voice": "jf_alpha"},
+            "chinese": {"lang_code": "z", "voice": "zf_xiaobei"}
+        }
+    },
+    "MASTERING": {
+        "highpass_hz": 75,
+        "loudness_lufs": -14,
+        "true_peak_dbtp": -1.5,
+        "sample_rate": 48000
+    },
+    "EDGE_SETTINGS": {
+        "retries": 3,
+        "retry_delay_seconds": 2,
+        "concurrency": 6,
+        "timeout_seconds": 60
     },
     "LANGUAGES": {
         "english": "en-US-ChristopherNeural",
@@ -82,41 +103,5 @@
         "uzbek": "uz-UZ-SardorNeural",
         "welsh": "cy-GB-AledNeural",
         "zulu": "zu-ZA-ThembaNeural"
-    },
-    "PRIMARY_ENGINE": {
-        "type": "chatterbox",
-        "enabled": true,
-        "languages": [
-            "english",
-            "en"
-        ],
-        "reference_audio": "models/english_reference.wav",
-        "max_chars": 350,
-        "crossfade_ms": 80,
-        "narration": {
-            "exaggeration": 0.65,
-            "cfg_weight": 0.35,
-            "temperature": 0.8,
-            "repetition_penalty": 1.2
-        },
-        "intro": {
-            "exaggeration": 0.75,
-            "cfg_weight": 0.3,
-            "temperature": 0.8,
-            "repetition_penalty": 1.2
-        }
-    },
-    "MASTERING": {
-        "highpass_hz": 75,
-        "denoise": true,
-        "denoise_db": 6,
-        "loudness_lufs": -14,
-        "true_peak_dbtp": -1.5,
-        "sample_rate": 48000
-    },
-    "EDGE_SETTINGS": {
-        "retries": 3,
-        "retry_delay_seconds": 2,
-        "circuit_breaker_failures": 5
     }
 }

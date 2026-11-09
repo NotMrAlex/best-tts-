@@ -1,201 +1,146 @@
-# DANK Engine — TTS
+# TTS Pipeline
 
-Local text-to-speech pipeline for manhwa / manga / anime / movie recap videos and Shorts.
+Turns the narration text in `story.json` into spoken audio files for your
+recap videos and Shorts. It supports 75 languages and picks the best voice
+engine for each one automatically.
 
-Two engines, chosen automatically by language:
+- **English, Spanish, French, Hindi, Italian, Portuguese, Japanese, Chinese**
+  use **Kokoro** — a free, local neural voice engine (no internet needed after
+  the first run, uses your NVIDIA GPU if you have one).
+- **Every other language** (Arabic, German, Russian, ...) uses **Edge-TTS** —
+  free online Microsoft voices.
 
-- **English** → **Chatterbox** (MIT-licensed, expressive, zero-shot voice cloning)
-- **All other languages** → **Edge-TTS** → **RVC** voice conversion
+Every file is saved as loudness-matched, mono 48 kHz WAV, ready to drop into
+a video editor.
 
-Every final file is mastered to mono 48 kHz, 16-bit PCM WAV with noise cleanup and -14 LUFS loudness.
+---
 
-## Requirements
+## 1. What you need to install first
 
-- Python 3.10 - 3.13
-- FFmpeg and FFprobe on PATH
-- Internet on the first run (Chatterbox downloads its model weights from Hugging Face)
+Only two things:
 
-### Install FFmpeg
+1. **Python 3.10 - 3.12** — from https://www.python.org/downloads/
+   During installation, tick **"Add Python to PATH"**.
+2. **FFmpeg** (for final audio processing) — from https://www.gyan.dev/ffmpeg/builds/
+   Download the "release essentials" zip, unzip it anywhere, and add its `bin`
+   folder to PATH. (If you already have ffmpeg, you can skip this.)
 
-Windows:
+That's it. You do **not** need to know any terminal commands.
 
-```powershell
-winget install Gyan.FFmpeg
-```
+---
 
-macOS:
+## 2. Download the project
 
-```bash
-brew install ffmpeg
-```
+If you got this as a zip file, unzip it to a folder on your computer
+(for example `C:\tts`).
 
-Ubuntu / Debian:
+---
 
-```bash
-sudo apt-get update && sudo apt-get install -y ffmpeg
-```
+## 3. Install the app
 
-## Setup
+1. Double-click **`install.bat`**.
+2. Wait. It will:
+   - Check that Python is installed.
+   - Create a private environment folder called `tts_env`.
+   - Detect your graphics card and install the right PyTorch build.
+   - Install every Python dependency.
+3. When it says **"Done!"**, close the window.
 
-Chatterbox and RVC have conflicting dependency pins and cannot live in the same
-virtual environment. Use two environments:
+> The first run downloads the Kokoro model (~330 MB) from Hugging Face. This
+> only happens once. After that, audio can be generated fully offline for the
+> local languages.
 
-### Environment 1 — English (Chatterbox + Edge-TTS)
+---
 
-Windows:
+## 4. Generate audio
 
-```powershell
-py -3.11 -m venv tts_env
-tts_env\Scripts\activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
+1. Make sure `story.json` is in the same folder as `run.bat`.
+2. Double-click **`run.bat`**.
+3. Audio files appear in the **`audio`** folder.
 
-macOS / Linux:
+Run it again any time — already-generated files are skipped automatically, so
+only new or changed narration is produced.
 
-```bash
-python3 -m venv tts_env
-source tts_env/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
+---
 
-For an NVIDIA GPU, install the CUDA Torch build in place of the defaults:
+## 5. Configure narration languages
 
-```bash
-python -m pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-python -m pip install -r requirements.txt
-```
-
-### Environment 2 — Non-English fallback (RVC)
-
-```bash
-python -m venv rvc_env
-# activate as shown above
-python -m pip install "pip<24.1"
-python -m pip install -r requirements-rvc.txt
-```
-
-On GPU machines, install the CUDA Torch build first (see the command above).
-On Linux, if `pyworld` / `fairseq` fail to build, install the system headers first:
-
-```bash
-sudo apt-get update && sudo apt-get install -y python3-dev build-essential
-```
-
-## Voice files
-
-Place these under `models/`:
-
-| File | Purpose |
-| --- | --- |
-| `english_reference.wav` | Chatterbox English voice clone, clean 3-15 seconds (5-10 recommended), no music/effects |
-| `*.pth` | RVC model for non-English fallback |
-| `*.index` | Optional RVC index file |
-
-Use audio you have permission to use as a voice reference.
-
-## Configuration
-
-`config_tts.json` is created automatically on the first run. Common settings:
-
-```json
-{
-  "PRIMARY_ENGINE": {
-    "enabled": true,
-    "languages": ["english", "en"],
-    "reference_audio": "models/english_reference.wav",
-    "narration": { "exaggeration": 0.65, "cfg_weight": 0.35 },
-    "intro": { "exaggeration": 0.75, "cfg_weight": 0.3 }
-  },
-  "MASTERING": {
-    "highpass_hz": 75,
-    "denoise": true,
-    "loudness_lufs": -14,
-    "true_peak_dbtp": -1.5,
-    "sample_rate": 48000
-  }
-}
-```
-
-- `exaggeration` — higher is more dramatic; `cfg_weight` — lower is slower and more deliberate.
-- Set `PRIMARY_ENGINE.enabled` to `false` to route English through Edge-TTS + RVC as well.
-
-## Story format
-
-`story.json`:
+Edit `story.json`. Each scene can contain text for as many languages as you
+want, using the pattern `narration_<language>`:
 
 ```json
 {
   "story": [
     {
       "render": true,
-      "page": 2,
+      "page": 1,
       "panel": 1,
-      "shorts": true,
-      "narration_english": "He finally came down the mountain.",
-      "narration_spanish": "Por fin bajó de la montaña.",
-      "intro_english": "This manhwa will keep you up all night!",
-      "animation": "zoom_in",
-      "sfx": "sword_unsheath",
-      "bgm": "dark_tension",
-      "transition": "fade"
+      "narration_english": "He finally reached the summit.",
+      "narration_spanish": "Por fin llegó a la cima.",
+      "narration_arabic": "وصل أخيراً إلى القمة."
     }
   ]
 }
 ```
 
-- `narration_<language>` and `intro_<language>` define the spoken text.
-- `intro_*` is optional and only appears on some scenes.
-- `"render": false` skips a scene.
+To skip a scene, set `"render": false`.
 
-## Run
+The supported language names are listed in `config_tts.json` under `LANGUAGES`
+(75 languages). The local (Kokoro) languages are listed under `LOCAL.languages`;
+everything else uses Edge-TTS automatically.
 
-```bash
-python tts_engine.py
+---
+
+## 6. Choose voices
+
+Open `config_tts.json` (a plain text file) and edit:
+
+- **Local voices** — under `LOCAL.languages`, change `"voice"`. English voices
+  include `af_heart`, `af_bella`, `af_nicole`, `am_michael` and more. Spanish
+  voices include `ef_dora` and `em_alex`, and so on.
+- **Edge voices** — under `LANGUAGES`, change the value, e.g.
+  `"english": "en-US-ChristopherNeural"` to another voice such as
+  `"en-US-GuyNeural"`.
+- **Speaking rate** — `AUDIO_RATE` (`"+0%"` is normal; `"+10%"` is faster).
+- **Loudness** — `MASTERING.loudness_lufs` (`-14` matches YouTube's standard).
+
+If you delete `config_tts.json`, the app recreates it with sensible defaults
+on the next run.
+
+---
+
+## 7. Where audio is saved
+
+```
+audio/english/1_1.wav          - narration for page 1, panel 1
+audio/english/intro/1_1.wav    - intro clips (if any)
+audio/spanish/1_1.wav
+audio/arabic/1_1.wav
 ```
 
-Output:
+Filenames use `page_panel` so you can match them to `page1_panel1` images in
+your editor.
 
-```text
-audio/english/2_1.wav
-audio/english/intro/2_1.wav
-audio/spanish/2_1.wav
+---
+
+## 8. Troubleshooting
+
+**"Python was not found"** — install Python (section 1) and re-run `install.bat`.
+
+**"ffmpeg/ffprobe missing"** — install FFmpeg (section 1), reopen the terminal,
+and run again.
+
+**A language fails to generate** — check that the language name in
+`story.json` exactly matches a key in `config_tts.json` `LANGUAGES`.
+
+**Kokoro isn't used (everything goes to Edge)** — this can happen if the model
+could not download on first run. Check your internet, then delete the `temp`
+folder and run `run.bat` again.
+
+**Want to regenerate one clip** — delete that file inside `audio/`, then run
+`run.bat` again.
+
+**More detail / logs** — open a terminal in the project folder and run:
 ```
-
-Audio filenames use `page_panel` so the video engine can match them to `page2_panel1` images.
-
-### Running mixed-language stories
-
-Because of the dependency split, generate the languages in two passes:
-
-1. English with `tts_env`, `PRIMARY_ENGINE.enabled` = `true`.
-2. Other languages with `rvc_env`, `PRIMARY_ENGINE.enabled` = `false`.
-
-Already-generated files are cached and skipped on later runs, so the two passes
-merge into one `audio/` tree.
-
-## Available languages
-
-75 configured languages.
-
-Chatterbox: English.
-
-Edge-TTS + RVC: Spanish, Hindi, Japanese, Korean, French, German, Chinese,
-Portuguese, Russian, Arabic, Indonesian, Italian, Turkish, Vietnamese, Thai,
-Polish, Dutch, Filipino, Bengali, Urdu, Tamil, Telugu, Marathi, Gujarati,
-Malayalam, Kannada, Punjabi, Ukrainian, Greek, Czech, Romanian, Swedish,
-Hungarian, Danish, Finnish, Norwegian, Bulgarian, Croatian, Slovak, Lithuanian,
-Slovenian, Latvian, Estonian, Serbian, Afrikaans, Albanian, Amharic,
-Azerbaijani, Bosnian, Burmese, Catalan, Galician, Georgian, Hebrew, Icelandic,
-Irish, Javanese, Kazakh, Khmer, Lao, Macedonian, Malay, Maltese, Mongolian,
-Nepali, Pashto, Persian, Sinhala, Somali, Sundanese, Swahili, Uzbek, Welsh, Zulu.
-
-## Troubleshooting
-
-- `403` from Edge-TTS — upgrade it (`python -m pip install "edge-tts>=7.3.1"`).
-- Chatterbox import/load errors — recreate the environment with `requirements.txt` pinned versions.
-- `Missing english reference` — add `models/english_reference.wav`.
-- `Missing ffmpeg` — install FFmpeg and FFprobe, then reopen the terminal.
-- First run is slow — model weights download once and are cached.
-- Cached files skip generation — delete the file inside `audio/` to regenerate it.
+tts_env\Scripts\python tts_engine.py
+```
